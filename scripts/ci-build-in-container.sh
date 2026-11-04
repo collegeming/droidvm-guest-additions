@@ -6,6 +6,12 @@
 # exec-format and on compiler-version-specific flags.
 set -euxo pipefail
 
+# pacman 7 runs its downloads under a Landlock sandbox, and qemu-user does not
+# implement Landlock: every sync dies with "restricting filesystem access failed"
+# before a single byte is fetched. The container is already the sandbox here.
+sed -i 's/^#DisableSandbox.*/DisableSandbox/' /etc/pacman.conf
+grep -q '^DisableSandbox' /etc/pacman.conf || printf '\nDisableSandbox\n' >> /etc/pacman.conf
+
 pacman -Sy --noconfirm --needed base-devel python linux-aarch64-headers
 
 python tests/test_pool_mmap_bounds.py
