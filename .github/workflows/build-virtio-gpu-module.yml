@@ -37,6 +37,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu \
             make bc flex bison libelf-dev libssl-dev xz-utils
+          # The ALARM kernel is built by a recent GCC and its prepared .config bakes in
+          # CONFIG_FUNCTION_ALIGNMENT, i.e. -fmin-function-alignment=4 (GCC >= 14). The
+          # default cross gcc on the runner is 13 and rejects it, so prefer the newest
+          # cross compiler the distribution has.
+          for v in 16 15 14; do
+            if sudo apt-get install -y --no-install-recommends "gcc-$v-aarch64-linux-gnu"; then
+              echo "CC=aarch64-linux-gnu-gcc-$v" >> "$GITHUB_ENV"
+              break
+            fi
+          done
+          grep -q '^CC=' "$GITHUB_ENV" || echo 'CC=aarch64-linux-gnu-gcc' >> "$GITHUB_ENV"
 
           mirror=http://mirror.archlinuxarm.org/aarch64/core
           pkg='${{ inputs.kernel_headers }}'
@@ -77,8 +88,8 @@ jobs:
           fi
           echo "KDIR=$KDIR"
           cat "$KDIR/include/config/kernel.release" || true
-          make -C gunyah_guest KDIR="$KDIR" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)"
+          make -C gunyah_guest KDIR="$KDIR" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$CC" -j"$(nproc)"
           make -C virtio_gpu  KDIR="$KDIR" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-               -j"$(nproc)" KBUILD_EXTRA_SYMBOLS="$PWD/gunyah_guest/Module.symvers"
+               -j"$(nproc)" CC="$CC" KBUILD_EXTRA_SYMBOLS="$PWD/gunyah_guest/Module.symvers"
           ls -l virtio_gpu/*.ko gunyah_guest/*.ko
           modinfo virtio_gpu/virtio-gpu.ko || true
