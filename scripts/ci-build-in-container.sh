@@ -22,7 +22,14 @@ echo "KDIR=$KDIR"
 cat "$KDIR/include/config/kernel.release"
 
 make -C gunyah_guest KDIR="$KDIR" -j"$(nproc)"
+# -Wno-error=incompatible-pointer-types: the mirror's headers (7.3.1-2) are newer
+# than the kernel this module ships for (7.3.0-1-aarch64), and virtgpu_display.c
+# -- a file this patch does not touch -- still uses the pre-rename
+# drm_crtc_helper_funcs.atomic_commit signature. CONFIG_WERROR turns that drift
+# into a build failure before any patched file is compiled. Pin kernel_headers to
+# the guest's exact version to drop this flag.
 make -C virtio_gpu KDIR="$KDIR" -j"$(nproc)" \
+     KCFLAGS=-Wno-error=incompatible-pointer-types \
      KBUILD_EXTRA_SYMBOLS="$PWD/gunyah_guest/Module.symvers"
 
 ls -l virtio_gpu/*.ko gunyah_guest/*.ko
