@@ -2,9 +2,15 @@ name: build-virtio-gpu-module
 
 # Compile gate for the out-of-tree virtio-gpu module, used to prove a patch in
 # this repo still builds. It is not an acceptance test: the headers come from
-# whatever linux-aarch64 version the mirror serves (pin with the `kernel_headers`
-# input to match the guest's `uname -r`), so a green run means "this compiles
-# against an aarch64 Arch kernel of that version", not "this ABI matches the VM".
+# whatever linux-aarch64 version the mirror serves (pin with the
+# `kernel_headers` input to match the guest's `uname -r`), so a green run means
+# "this compiles against an aarch64 Arch kernel of that version", not "this ABI
+# matches the VM".
+#
+# The build runs in an aarch64 container under qemu, not cross-compiled from
+# x86: the guest kernel's prepared headers tree ships native kbuild host tools
+# (scripts/basic/fixdep, ...) and bakes in flags from the compiler that built it,
+# so an x86 cross build fails before it compiles a single line of this module.
 #
 # Nothing here touches a device. Runtime acceptance still happens on the VM.
 
@@ -27,77 +33,39 @@ on:
 jobs:
   module:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
-      - name: Make the aarch64 toolchain and kernel headers available
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Pin the kernel headers package
+        if: inputs.kernel_headers != ''
         run: |
           set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu \
-            make bc flex bison libelf-dev libssl-dev xz-utils
-          # The ALARM kernel is built by a recent GCC and its prepared .config bakes in
-          # CONFIG_FUNCTION_ALIGNMENT, i.e. -fmin-function-alignment=4 (GCC >= 14). The
-          # default cross gcc on the runner is 13 and rejects it, so prefer the newest
-          # cross compiler the distribution has.
-          for v in 16 15 14; do
-            if sudo apt-get install -y --no-install-recommends "gcc-$v-aarch64-linux-gnu"; then
-              echo "CC=aarch64-linux-gnu-gcc-$v" >> "$GITHUB_ENV"
-              break
-            fi
-          done
-          grep -q '^CC=' "$GITHUB_ENV" || echo 'CC=aarch64-linux-gnu-gcc' >> "$GITHUB_ENV"
-
-          mirror=http://mirror.archlinuxarm.org/aarch64/core
           pkg='${{ inputs.kernel_headers }}'
-          if [ -z "$pkg" ]; then
-            pkg=$(curl -fsSL "$mirror/" \
-                  | grep -o 'linux-aarch64-headers-[0-9][^"<]*aarch64\.pkg\.tar\.xz' \
-                  | sort -u | tail -1)
-          fi
-          echo "headers package: $pkg"
-          curl -fsSL "$mirror/$pkg" -o /tmp/headers.pkg.tar.xz
-          sudo tar -xJf /tmp/headers.pkg.tar.xz -C /
-          ls -d /usr/src/linux-headers-* /usr/lib/modules/*/build
+          curl -fsSL "http://mirror.archlinuxarm.org/aarch64/core/$pkg" -o /tmp/headers.pkg.tar.xz
+          echo "pin: $pkg (fetched, $(stat -c %s /tmp/headers.pkg.tar.xz) bytes)"
 
-      - name: Self-test the patch script
-        run: python3 tests/test_pool_mmap_bounds.py
-
-      - name: Apply the patch
-        run: python3 scripts/patch_pool_mmap_bounds.py --root .
-
-      - name: Build gunyah_guest, then the patched virtio-gpu
+      - name: Build in the guest's own architecture
         run: |
           set -euxo pipefail
-          # Pick the aarch64 headers, not the runner's own kernel tree: the
-          # ubuntu-24.04 image ships /usr/src/linux-headers-<ver>-azure, and taking
-          # the first linux-headers-* glob silently builds the module for x86_64
-          # (it then dies on -mrecord-mcount). Select by content, not by name.
-          KDIR=
-          for d in /usr/lib/modules/*/build /usr/src/linux-headers-*; do
-            [ -e "$d/Makefile" ] || continue
-            if grep -qs 'CONFIG_ARM64' "$d/include/generated/autoconf.h"; then
-              KDIR=$d; break
-            fi
-          done
-          if [ -z "$KDIR" ]; then
-            echo "no aarch64 kernel headers found:" >&2
-            ls -d /usr/src/linux-headers-* /usr/lib/modules/*/build >&2 || true
-            exit 1
+          extra=
+          if [ -f /tmp/headers.pkg.tar.xz ]; then
+            extra='-v /tmp/headers.pkg.tar.xz:/tmp/headers.pkg.tar.xz:ro'
           fi
-          echo "KDIR=$KDIR"
-          cat "$KDIR/include/config/kernel.release" || true
-          # The headers package ships kbuild's host tools already built for aarch64
-          # (scripts/basic/fixdep and friends), and kbuild reuses them because their
-          # timestamps are newer than the sources -- then exec fails on an x86 runner
-          # ("Exec format error"). Drop every aarch64 executable in the tree so kbuild
-          # rebuilds them with the runner's own HOSTCC.
-          for f in $(find "$KDIR/scripts" "$KDIR/tools" -maxdepth 4 -type f -perm -u+x 2>/dev/null || true); do
-            if file -b "$f" | grep -q 'ARM aarch64'; then sudo rm -f "$f"; fi
-          done
-          make -C gunyah_guest KDIR="$KDIR" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$CC" -j"$(nproc)"
-          make -C virtio_gpu  KDIR="$KDIR" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-               -j"$(nproc)" CC="$CC" KBUILD_EXTRA_SYMBOLS="$PWD/gunyah_guest/Module.symvers"
-          ls -l virtio_gpu/*.ko gunyah_guest/*.ko
-          modinfo virtio_gpu/virtio-gpu.ko || true
+          # shellcheck disable=SC2086
+          docker run --rm --platform linux/arm64 \
+            -v "$PWD:/src" $extra -w /src \
+            menci/archlinuxarm:base bash /src/scripts/ci-build-in-container.sh
+
+      - name: Keep the built modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: virtio-gpu-modules
+          path: |
+            virtio_gpu/*.ko
+            gunyah_guest/*.ko
+          if-no-files-found: warn
