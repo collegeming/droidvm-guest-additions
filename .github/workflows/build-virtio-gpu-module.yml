@@ -59,14 +59,26 @@ jobs:
       - name: Build gunyah_guest, then the patched virtio-gpu
         run: |
           set -euxo pipefail
-          KDIR=$(ls -d /usr/src/linux-headers-*/ | head -1)
-          # headers-only trees ship a prepared build dir; point the module build at it
-          if [ ! -e "$KDIR/Makefile" ] && [ -e "$KDIR/../build" ]; then
-            KDIR=$(ls -d /usr/lib/modules/*/build | head -1)
+          # Pick the aarch64 headers, not the runner's own kernel tree: the
+          # ubuntu-24.04 image ships /usr/src/linux-headers-<ver>-azure, and taking
+          # the first linux-headers-* glob silently builds the module for x86_64
+          # (it then dies on -mrecord-mcount). Select by content, not by name.
+          KDIR=
+          for d in /usr/lib/modules/*/build /usr/src/linux-headers-*; do
+            [ -e "$d/Makefile" ] || continue
+            if grep -qs 'CONFIG_ARM64' "$d/include/generated/autoconf.h"; then
+              KDIR=$d; break
+            fi
+          done
+          if [ -z "$KDIR" ]; then
+            echo "no aarch64 kernel headers found:" >&2
+            ls -d /usr/src/linux-headers-* /usr/lib/modules/*/build >&2 || true
+            exit 1
           fi
           echo "KDIR=$KDIR"
-          make -C gunyah_guest KDIR="$KDIR" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+          cat "$KDIR/include/config/kernel.release" || true
+          make -C gunyah_guest KDIR="$KDIR" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc)"
           make -C virtio_gpu  KDIR="$KDIR" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-               KBUILD_EXTRA_SYMBOLS="$PWD/gunyah_guest/Module.symvers"
+               -j"$(nproc)" KBUILD_EXTRA_SYMBOLS="$PWD/gunyah_guest/Module.symvers"
           ls -l virtio_gpu/*.ko gunyah_guest/*.ko
           modinfo virtio_gpu/virtio-gpu.ko || true
