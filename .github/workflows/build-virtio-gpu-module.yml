@@ -88,6 +88,14 @@ jobs:
           fi
           echo "KDIR=$KDIR"
           cat "$KDIR/include/config/kernel.release" || true
+          # The headers package ships kbuild's host tools already built for aarch64
+          # (scripts/basic/fixdep and friends), and kbuild reuses them because their
+          # timestamps are newer than the sources -- then exec fails on an x86 runner
+          # ("Exec format error"). Drop every aarch64 executable in the tree so kbuild
+          # rebuilds them with the runner's own HOSTCC.
+          for f in $(find "$KDIR/scripts" "$KDIR/tools" -maxdepth 4 -type f -perm -u+x 2>/dev/null || true); do
+            if file -b "$f" | grep -q 'ARM aarch64'; then sudo rm -f "$f"; fi
+          done
           make -C gunyah_guest KDIR="$KDIR" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="$CC" -j"$(nproc)"
           make -C virtio_gpu  KDIR="$KDIR" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
                -j"$(nproc)" CC="$CC" KBUILD_EXTRA_SYMBOLS="$PWD/gunyah_guest/Module.symvers"
